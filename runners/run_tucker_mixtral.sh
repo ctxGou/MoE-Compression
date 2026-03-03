@@ -68,7 +68,6 @@ python src/run_tucker.py \
     --decomposition_method "svd" \
     --run_eval True \
     --ppl_datasets wikitext2 ptb c4 \
-    --eval_tasks openbookqa winogrande piqa arc_easy arc_challenge mathqa \
-
+    --eval_tasks openbookqa winogrande piqa arc_easy arc_challenge mathqa
 
 
