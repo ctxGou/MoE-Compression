@@ -1,0 +1,38 @@
+*.log
+log/
+logs/
+Logs/
+*.pt
+history/
+scaling_matrix_logs/
+MoESVD/__pycache__/
+test_*.py
+*.ipynb
+MoESVD/transformers-4.40.1/
+MoESVD/
+utils/
+__pycache__/
+*.pyc
+
+# Experiment artifacts
+results/
+output/
+cache/
+
+# Common model/checkpoint artifacts
+*.bin
+*.safetensors
+
+# Python/tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local env/editor
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+.DS_Store
