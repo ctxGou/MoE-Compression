@@ -74,6 +74,58 @@ def calculate_tucker_ranks(n0, n1, n2, ratio, fix_r0=True) -> List[int]:
     return [r0, best_r1, best_r2]
 
 
+def calculate_tucker_ranks_equal(n0, n1, n2, ratio, fix_r0=True) -> List[int]:
+    """
+    计算 Tucker ranks [r0, r1, r2]，其中强制 r1 == r2。
+    目标是在参数预算内选择最大的对称瓶颈 r。
+
+    约束:
+        P_tucker = r0*r^2 + n0*r0 + n1*r + n2*r <= P_orig*(1-ratio)
+    """
+    print(f"DEBUG(calculate_tucker_ranks_equal):{n0=}, {n1=}, {n2=}, {ratio=}, {fix_r0=}")
+    if not fix_r0:
+        raise AssertionError("calculate_tucker_ranks_equal requires fix_r0=True.")
+
+    r0 = n0
+    original_params = n0 * n1 * n2
+    target_params = int(original_params * (1 - ratio))
+
+    max_rank = min(n1, n2)
+    best_r = 1
+    for r in range(1, max_rank + 1):
+        compressed = r0 * r * r + n0 * r0 + n1 * r + n2 * r
+        if compressed <= target_params:
+            best_r = r
+        else:
+            break
+
+    r1 = best_r
+    r2 = best_r
+
+    core_shape = (r0, r1, r2)
+    U0_shape = (n0, r0)
+    U1_shape = (n1, r1)
+    U2_shape = (n2, r2)
+
+    original_params_m = original_params / 1e6
+    core_params = r0 * r1 * r2 / 1e6
+    U0_params = n0 * r0 / 1e6
+    U1_params = n1 * r1 / 1e6
+    U2_params = n2 * r2 / 1e6
+    total_params = core_params + U0_params + U1_params + U2_params
+
+    print(f"Original tensor shape  = {(n0,n1,n2)}, params = {original_params_m:2f}M -> Tucker ranks={(r0, r1, r2)}  params = {total_params:2f}M \n")
+    print(f"Core tensor shape  = {core_shape}, params = {core_params:2f}M")
+    print(f"Factor U0 shape    = {U0_shape}, params = {U0_params:2f}M")
+    print(f"Factor U1 shape    = {U1_shape}, params = {U1_params:2f}M")
+    print(f"Factor U2 shape    = {U2_shape}, params = {U2_params:2f}M")
+    print(f"Total compressed params = {total_params:2f}M")
+    print(f"Original params         = {original_params_m:2f}M")
+    print(f"Actual compression ratio= {1-total_params/original_params_m:.4f}")
+
+    return [r0, r1, r2]
+
+
 
 
 

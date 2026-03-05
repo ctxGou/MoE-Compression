@@ -151,6 +151,43 @@ import gc
 #         # return final_output
 #         return final_output
 
+def cond_check_tensor(tensor, name):
+    """
+    Print the condition number of the given tensor.
+    2D tensors are trivial, 3D tensors report a list of cond for each slice along the first dimension.
+    """
+    if tensor is None:
+        return
+
+    def _safe_cond(mat: torch.Tensor):
+        probe = mat
+        if probe.dtype in (torch.float16, torch.bfloat16):
+            probe = probe.to(torch.float32)
+        try:
+            return torch.linalg.cond(probe)
+        except NotImplementedError:
+            # Fallback for backends/dtypes without CUDA SVD support
+            return torch.linalg.cond(probe.cpu().to(torch.float32))
+        except RuntimeError as e:
+            print(f"  - Skipping cond({name}) due to runtime error: {e}")
+            return None
+
+    if tensor.ndim == 2:
+        cond_number = _safe_cond(tensor)
+        if cond_number is not None:
+            print(f"  - Condition number of {name}: {float(cond_number):.2e}")
+    elif tensor.ndim == 3:
+        cond_numbers = []
+        for i in range(tensor.shape[0]):
+            slice_i = tensor[i, :, :]
+            cond_i = _safe_cond(slice_i)
+            if cond_i is not None:
+                cond_numbers.append(float(cond_i))
+        if cond_numbers:
+            print(f"  - Condition numbers of {name} slices: {[f'{c:.2e}' for c in cond_numbers]}")
+    else:
+        return
+
 class TuckerDecomposedMLP(nn.Module):
     """
     融合版本：恢复使用基于秩循环的快速计算逻辑。
@@ -170,6 +207,13 @@ class TuckerDecomposedMLP(nn.Module):
         self.register_buffer('S2_inv', torch.linalg.inv(S2).to(device=device, dtype=dtype) if S2 is not None else None)
         self.register_buffer('S3', S3.to(device=device, dtype=dtype) if S3 is not None else None)
         
+        cond_check_tensor(self.core, "core")
+        cond_check_tensor(self.U_exp, "U_exp")
+        cond_check_tensor(self.U_out, "U_out")
+        cond_check_tensor(self.U_in, "U_in")
+        cond_check_tensor(self.S2_inv, "S2_inv")
+        cond_check_tensor(self.S3, "S3")
+
         self.d_out = d_out
         self.bias = None
 

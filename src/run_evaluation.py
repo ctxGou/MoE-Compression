@@ -5,6 +5,7 @@ import torch
 import json
 from pathlib import Path
 import gc
+from collections import Counter
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
@@ -14,6 +15,34 @@ from config import get_model_config, set_layer_by_name, get_layer_by_name
 from components.tucker_mixtral import MixtralTuckerDecomposedMoE
 # from components.custom_mixtral import CustomMixtralDecoderLayer
 from run_whitening import allocate_ratios_by_importance
+
+
+def _ratio_to_str(value: float) -> str:
+    return f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _get_ratio_for_files(args) -> float:
+    eff = getattr(args, "effective_local_ratio", None)
+    if eff is not None:
+        return float(eff)
+    return float(args.ratio)
+
+
+def _get_param_stats(model):
+    total_params = 0
+    trainable_params = 0
+    dtype_counter = Counter()
+    for p in model.parameters():
+        n = p.numel()
+        total_params += n
+        if p.requires_grad:
+            trainable_params += n
+        dtype_counter[str(p.dtype)] += n
+    return {
+        "total_params": int(total_params),
+        "trainable_params": int(trainable_params),
+        "dtype_breakdown": dict(dtype_counter),
+    }
     
 def main(args):
     print(f"--- 启动评估 ---")
@@ -22,6 +51,8 @@ def main(args):
     print("\n--- 1. 加载基准模型 ---")
     model, tokenizer = load_fp16_model(args.model_path)
     model.eval()
+    initial_param_stats = _get_param_stats(model)
+    print(f"[ParamStats][loaded] total={initial_param_stats['total_params']:,}, trainable={initial_param_stats['trainable_params']:,}")
 
     model_config = get_model_config(args.model_path)
     model_name = Path(args.model_path).name
@@ -110,6 +141,15 @@ def main(args):
                 / args.decomposition_method
                 / args.whiten_type
             )
+            ratio_for_files = _get_ratio_for_files(args)
+            ratio_scope = getattr(args, "ratio_scope", "local")
+            ratio_scope_dir = (
+                "ratio_scope_local"
+                if ratio_scope == "local"
+                else f"ratio_scope_global_eff_{_ratio_to_str(ratio_for_files)}"
+            )
+            modern_base_path = modern_base_path / ratio_scope_dir
+            modern_policy_base_path = modern_base_path / f"policy_{args.rank_policy}"
             legacy_base_path = (
                 Path(args.save_path)
                 / "decomposition_results"
@@ -117,7 +157,10 @@ def main(args):
                 / current_layer_mode
                 / args.whiten_type
             )
-            base_results_path = modern_base_path if modern_base_path.exists() else legacy_base_path
+            if args.rank_policy != "default" and modern_policy_base_path.exists():
+                base_results_path = modern_policy_base_path
+            else:
+                base_results_path = modern_base_path if modern_base_path.exists() else legacy_base_path
         
         # 3. 为当前层加载分解数据
         layer_decomposition_data = {}
@@ -131,10 +174,15 @@ def main(args):
             for group_name in cluster_data[layer_key].keys():
                 group_data = {}
                 for role, role_param_name in model_config.role_map.items():
-                    comp_filename = f"layer_{layer_idx}_{role}_{group_name}_ratio_{args.ratio}_{args.whiten_type}.pt"
-                    comp_path = base_results_path / comp_filename
-                    if not comp_path.exists():
-                        raise FileNotFoundError(f"缺少分组分解文件: {comp_path}")
+                    candidates = []
+                    ratio_tag = _ratio_to_str(ratio_for_files)
+                    if args.rank_policy != "default":
+                        candidates.append(base_results_path / f"layer_{layer_idx}_{role}_{group_name}_ratio_{ratio_tag}_{args.whiten_type}_policy_{args.rank_policy}.pt")
+                    candidates.append(base_results_path / f"layer_{layer_idx}_{role}_{group_name}_ratio_{args.ratio}_{args.whiten_type}.pt")
+                    candidates.append(base_results_path / f"layer_{layer_idx}_{role}_{group_name}_ratio_{ratio_tag}_{args.whiten_type}.pt")
+                    comp_path = next((p for p in candidates if p.exists()), None)
+                    if comp_path is None:
+                        raise FileNotFoundError(f"缺少分组分解文件，已尝试: {candidates}")
                     
                     print(f"  - 加载 {group_name} 的 '{role}' 组件...")
                     group_data[role_param_name] = torch.load(comp_path, map_location='cpu')
@@ -146,17 +194,17 @@ def main(args):
                 # 自适应模式的文件名
                 if args.important_layers:
                     comp_filename = f"layer_{layer_idx}_{role}_ratio_adp_{args.ratio}_{args.whiten_type}.pt"
+                    comp_path = base_results_path / comp_filename
                 else:
-                    # 固定模式的文件名
-                    comp_filename = f"layer_{layer_idx}_{role}_ratio_{args.ratio}_{args.whiten_type}.pt"
-                    
-                 # comp_filename = f"layer_{layer_idx}_{role}_ratio_{args.ratio}_{args.whiten_type}_balanced.pt"                                    
-                comp_path = base_results_path / comp_filename
-                
-                if not comp_path.exists():
-                    # comp_filename = f"layer_{layer_idx}_{role}_ratio_{args.ratio}_{args.whiten_type}.pt"
-                    # comp_path = base_results_path / comp_filename                    
-                    raise FileNotFoundError(f"警告: 在层 {layer_idx} 缺少分解文件，路径: {comp_path}。")
+                    candidates = []
+                    ratio_tag = _ratio_to_str(ratio_for_files)
+                    if args.rank_policy != "default":
+                        candidates.append(base_results_path / f"layer_{layer_idx}_{role}_ratio_{ratio_tag}_{args.whiten_type}_policy_{args.rank_policy}.pt")
+                    candidates.append(base_results_path / f"layer_{layer_idx}_{role}_ratio_{args.ratio}_{args.whiten_type}.pt")
+                    candidates.append(base_results_path / f"layer_{layer_idx}_{role}_ratio_{ratio_tag}_{args.whiten_type}.pt")
+                    comp_path = next((p for p in candidates if p.exists()), None)
+                    if comp_path is None:
+                        raise FileNotFoundError(f"警告: 在层 {layer_idx} 缺少分解文件，已尝试: {candidates}。")
                 
                 print(f"从 {comp_path} 加载分解组件...")
                 layer_decomposition_data[role_param_name] = torch.load(comp_path, map_location='cpu')
@@ -200,12 +248,32 @@ def main(args):
     gc.collect()
     torch.cuda.empty_cache()
     print(model)
+    replaced_param_stats = _get_param_stats(model)
+    print(f"[ParamStats][after_replacement] total={replaced_param_stats['total_params']:,}, trainable={replaced_param_stats['trainable_params']:,}")
 
     layers_str = "_".join(map(str, args.layers_to_compress))
     experiment_name = f"{args.dataset}_ratio_{args.ratio}_layers_{layers_str}_{args.cluster_type}_{args.whiten_type}"
+    if getattr(args, "ratio_scope", "local") != "local":
+        ratio_for_files = _get_ratio_for_files(args)
+        experiment_name += f"_scope_{args.ratio_scope}_local_{_ratio_to_str(ratio_for_files)}"
+    if args.rank_policy != "default":
+        experiment_name += f"_policy_{args.rank_policy}"
     
     if args.important_layers:
         experiment_name = f"{args.dataset}_adp_factor_{args.importance_factor}_ratio_{args.ratio}_layers_{layers_str}_{args.cluster_type}_{args.whiten_type}"
+
+    param_stats_path = eval_save_dir / f"param_stats_{experiment_name}.json"
+    param_stats_payload = {
+        "model_path": args.model_path,
+        "experiment_name": experiment_name,
+        "loaded_model": initial_param_stats,
+        "after_replacement": replaced_param_stats,
+        "delta_total_params": int(replaced_param_stats["total_params"] - initial_param_stats["total_params"]),
+        "args": vars(args),
+    }
+    with open(param_stats_path, "w") as f:
+        json.dump(param_stats_payload, f, indent=2)
+    print(f"参数统计已保存至: {param_stats_path}")
     
     ppl_save_path = eval_save_dir / f"ppl_{experiment_name}.txt"
     
@@ -242,8 +310,11 @@ if __name__ == "__main__":
     parser.add_argument("--eval_tasks", type=str,nargs='+', default=["openbookqa", "arc_easy", "winogrande", "arc_challenge", "piqa", "mathqa", "hellaswag"], help="Task names for lm-eval")  
     
     parser.add_argument("--ratio", type=float, required=True)
+    parser.add_argument("--ratio_scope", type=str, default="local", choices=["local", "global"])
+    parser.add_argument("--effective_local_ratio", type=float, default=None, help="当 ratio_scope=global 且文件名使用等效局部ratio时可手动指定")
     parser.add_argument("--cluster_type", type=str, default="global", choices=["global", "group", "mixed"])
     parser.add_argument("--decomposition_method", type=str, default="svd", choices=["svd", "qr", "rand"])
+    parser.add_argument("--rank_policy", type=str, default="default", choices=["default", "equal"])
     parser.add_argument("--whiten_type", type=str, required=True, choices=["input", "output", "both", "none"])
     parser.add_argument("--layers_to_compress", type=int, nargs='+', required=True)
     parser.add_argument("--global_layers", type=int, nargs='+', default=None, help="List of layer indices to be treated as 'global' in 'mixed' mode.")
