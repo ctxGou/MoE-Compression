@@ -1,0 +1,51 @@
+# Final Mixtral k832 gate+up recipe; Python layer bounds are exclusive.
+# Sources: original k832 training script, uv_lr_scale=0.05 outlier-retraining
+# script, and build__slbf_k832_m8_g_u_gf_proxy.sh (six integrated replacements).
+model:
+  base_dir: local_models/Mixtral-8x7B-v0.1
+  save_path: results/wab/mixtral/slbf_k832_final
+  start_layer: 0
+  end_layer: 32
+  projections: [gate_proj, up_proj]
+defaults:
+  model_variant: mixtral
+  num_hidden_layers: 32
+  num_matrices: 8
+  rows_per_matrix: 4096
+  cols: 14336
+  truncation: 4096
+  num_B: 8
+  rank_per_basis: 832
+  init_mode: msign
+  norm_mode: global_std
+  activation: silu
+  batch_size: 8
+  num_batches: 1
+  learning_rate: 0.03
+  uv_lr_scale: 0.1
+  w_lr_scale: 1.0
+  w_init_logit: 1.0
+  lr_scheduler: cosine
+  scheduler_eta_min: 0.0001
+  weight_decay: 0.02
+  beta1: 0.9
+  beta2: 0.999
+  num_epochs: 8000
+  early_stop_patience: 0
+  grad_clip: 0.0
+  ortho_freq: 0
+  fast: true
+# Each override merges into defaults for exactly one (layer, projection).
+# This applies the selected final LR directly when training from scratch.
+overrides:
+  12:
+    up_proj: {uv_lr_scale: 0.05}
+  14:
+    gate_proj: {uv_lr_scale: 0.05}
+    up_proj: {uv_lr_scale: 0.05}
+  17:
+    gate_proj: {uv_lr_scale: 0.05}
+  29:
+    gate_proj: {uv_lr_scale: 0.05}
+  31:
+    up_proj: {uv_lr_scale: 0.05}

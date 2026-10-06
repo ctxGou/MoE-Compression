@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slbf"
+version = "0.1.0"
+description = "SLBF weight-space training and gauge-fixed Mixtral deployment"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[project.entry-points."vllm.general_plugins"]
+slbf_models = "models.vllm_plugin:register_models"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["models*"]

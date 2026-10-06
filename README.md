@@ -1,141 +1,107 @@
-# TD-MoE: Tensor Decomposition for MoE Models
+We provide code, paper, and poster of  ***Shared Low-rank Basis Factorization for Data-free Mixture-of-Experts Compression***.
 
-This repository contains the official implementation for our paper **"TD-MoE: Cross-Expert Decomposition for MoE Models"**.
+This code trains and evaluates SLBF on Mixtral-8x7B-v0.1. It includes
+gauge-fixed checkpoint conversion, a vLLM runtime plugin, and a MoBE baseline.
 
-## Installation
+## Set up
 
-### Environment Setup
-
-Create and activate the conda environment:
-
-```bash
-conda env create -f environment.yml
-conda activate MoeComp
-```     
-
-### Key Dependencies
-
-- Python 3.11+
-- PyTorch 2.0+
-- Transformers 4.30+
-- TensorLy
-- NumPy, SciPy
-
-## Quick Start
-
-### 1. Basic Compression
-
-Compress a Mixtral model with 20% compression ratio:
+Run the commands from the directory that contains this README.
 
 ```bash
-bash tucker_mixtral.sh
+conda create -n slbf python=3.11 -y
+conda activate slbf
+pip install -r requirements.txt
 ```
 
-### 2. Custom Compression
+## Train
+
+Set `BASE_MODEL` to a local Mixtral checkpoint directory with safetensors weights.
 
 ```bash
-python src/run_tucker.py \
-    --model_path /path/to/model \
-    --save_path ./results \
-    --ratio 0.2 \
-    --layers_to_compress 3 5 6 7 9 12 23 24 25 \
-    --cluster_type global \
-    --whiten_type both \
-    --decomposition_method hosvd
+BASE_MODEL=/path/to/Mixtral-8x7B-v0.1
+python scripts/train/from_yaml.py --base_dir "$BASE_MODEL" --gpu 0
 ```
 
-### 3. Evaluation
+The [training configuration](configs/mixtral_slbf_k832.yaml) sets the common
+parameters and the layer-specific learning rates. The recipe uses eight
+bases of rank 832. It compresses the gate and up projections and keeps the
+down projections unchanged.
+
+The trainer saves factor checkpoints in `results/wab/mixtral/slbf_k832_final`.
+Add `--dry_run` to show the commands. Add `--skip_existing` to resume training.
+
+## Evaluate
+
+Create an evaluation environment. The requirements specify lm-eval 0.4.11,
+vLLM 0.19.1, and Transformers 5.6.2.
 
 ```bash
-python src/run_evaluation.py \
-    --model_path /path/to/model \
-    --save_path ./results \
-    --ratio 0.2 \
-    --layers_to_compress 3 5 6 7 9 12 23 24 25 \
-    --cluster_type global \
-    --eval_tasks winogrande piqa arc_easy arc_challenge
+conda create -n slbf-eval python=3.12 -y
+conda activate slbf-eval
+pip install -r requirements-eval.txt
 ```
 
-## Directory Structure
+Build a standard Mixtral checkpoint from the trained factors. Use a new
+output directory.
 
-```
-TD-MoE/
-├── src/                                    # Core implementation
-│   ├── config.py                          # Model configurations for different MoE architectures
-│   ├── data_collection.py                 # Activation and gradient collection via hooks
-│   ├── tucker_decomposition.py            # Core Tucker decomposition algorithms
-│   ├── layer_selection.py                 # Layer sensitivity analysis
-│   ├── run_tucker.py                      # Main compression pipeline
-│   ├── run_evaluation.py                  # Evaluation pipeline
-│   ├── evaluator.py                       # Task evaluation utilities
-│   └── components/                        # Model-specific MoE implementations
-│       ├── base_moe.py                    # Base Tucker-decomposed MoE class
-│       ├── tucker_mixtral.py              # Mixtral-specific implementation
-│       └── tucker_phi.py                  # Phi-3.5-MoE-specific implementation
-│
-├── scripts/                               # Experiment scripts
-│   ├── tucker_mixtral.sh                  # Mixtral compression script
-│   └── tucker_phi.sh                      # Phi-3.5-MoE compression script
-│
-├── lm-evaluation-harness/                  # Evaluation framework
-│   └── ...                               # Modified lm-eval for MoE evaluation
-│
-├── results/                               # Experimental outputs
-│   ├── decomposition_results/             # Compressed model components  
-│   │   └── {model_name}/
-│   │       ├── global/                    # Global compression results
-│   │       ├── group/                     # Group-based compression results
-│   │       └── adaptive/                  # Adaptive compression results
-│   ├── evaluation_results/                # Task evaluation results
-│   └── covariances/                       # Cached covariance matrices
-│
-├── rank_allocation/                       # Rank allocation analysis
-│   ├── outputs.csv                        # Compression ratio analysis
-│   └── results/                           # Visualization outputs
-│
-└── environment.yml                        # Conda environment specification
+```bash
+python get_hf_model_from_wab.py \
+  --base_model "$BASE_MODEL" --mobe_dir results/wab/mixtral/slbf_k832_final \
+  --save_dir results/materialized/mixtral_slbf \
+  --start_layer 0 --end_layer 32 --num_experts 8 \
+  --model_variant mixtral --gauge_fix --skip_projections down_proj \
+  --required_projections gate_proj up_proj
+
+bash scripts/eval/mixtral/run_eval.sh results/materialized/mixtral_slbf slbf 0,1,2,3
 ```
 
-## Methodology
+The evaluator uses the supplied [task templates](scripts/eval/mixtral/tasks/README.md).
+It runs eight zero-shot tasks: ARC-Challenge, ARC-Easy, HellaSwag,
+OpenBookQA, RTE, WinoGrande, PIQA, and Wikitext. It saves results in
+`results/eval` and logs in `logs`.
 
-### Core Components
+## Use a compact checkpoint
 
-1. **Covariance Collection**: Collect activation and gradient statistics using forward hooks
-2. **Whitening Transformation**: Apply Cholesky decomposition for input/output whitening  
-3. **Tucker Decomposition**: Decompose whitened tensors using HOSVD or ALS algorithms
-4. **Model Reconstruction**: Rebuild compressed MoE layers with Tucker factors
+Pack the trained factors into the gauge-fixed format. Use a new output directory.
 
-### Compression Modes
+```bash
+conda activate slbf
+python scripts/build/mixtral/pack_gauge_fixed.py \
+  --base_model "$BASE_MODEL" --wab_dir results/wab/mixtral/slbf_k832_final \
+  --save_dir results/compact/mixtral_slbf
+```
 
-- **Global**: All experts share the same decomposition basis
-- **Group**: Experts are clustered and decomposed by groups  
-- **Mixed**: Combine global and group strategies for different layers
-- **Adaptive**: Use layer sensitivity to determine compression ratios
+Install the runtime plugin in a separate environment. It uses vLLM 0.17.1.
 
-### Whitening Strategies
+```bash
+conda create -n slbf-runtime python=3.11 -y
+conda activate slbf-runtime
+pip install -r requirements-runtime.txt
+pip install --no-deps -e .
 
-- `input`: Whiten input activations only
-- `output`: Whiten output gradients only  
-- `both`: Apply both input and output whitening
-- `none`: No whitening (baseline Tucker decomposition)
+CUDA_VISIBLE_DEVICES=0,1 python scripts/bench/mixtral_smoke_test.py \
+  --model results/compact/mixtral_slbf --pp 2
+```
 
-## Experiments
+The runtime reconstructs weights during inference. The
+[benchmark script](scripts/bench/mixtral_throughput.py) measures throughput
+and GPU memory use. The [unpack script](scripts/build/mixtral/unpack_to_materialized.py)
+converts a compact checkpoint into standard Mixtral weights.
 
-### Evaluation Tasks  
+## Run tests
 
-- **Language Modeling**: WikiText2, PTB perplexity
-- **Commonsense Reasoning**: PIQA, WinoGrande, OpenBookQA
-- **Reading Comprehension**: ARC-Easy, ARC-Challenge
+Run the CPU tests in the training environment.
 
+```bash
+conda activate slbf
+python -m unittest discover -s tests -v
+```
 
-## Configuration
+## Acknowledgement
 
-Key parameters in compression scripts:
+This repository builds upon [MoBE](https://github.com/inclusionAI/MoBE). We thank the authors for releasing their code.
 
-- `--ratio`: Global compression ratio (0.1-0.8)
-- `--layers_to_compress`: List of target layer indices  
-- `--cluster_type`: Compression mode (global/group/mixed)
-- `--whiten_type`: Whitening strategy (input/output/both/none)
-- `--decomposition_method`: Tucker algorithm (hosvd/als)
-- `--whitening_nsamples`: Calibration samples for covariance estimation
+## Citation
+
+<!-- TODO: Add the paper citation. -->
 
