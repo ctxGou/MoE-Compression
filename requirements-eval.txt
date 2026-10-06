@@ -1,0 +1,4 @@
+# Stock-vLLM evaluation of dense checkpoints; use a separate environment.
+vllm==0.19.1
+transformers==5.6.2
+lm-eval==0.4.11
